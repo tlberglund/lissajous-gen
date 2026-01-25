@@ -35,6 +35,7 @@ class Config:
         self.glow_radius = 8
         self.glow_intensity = 1.8
         self.background_color = (0.0, 0.0, 0.0)
+        self.beam_sharpness = 3.0
         self.sample_rate = 44100
         self.buffer_size = 2048
         self.amplitude_scale = 0.9
@@ -64,6 +65,7 @@ class Config:
             self.decay_rate = viz.get('decay_rate', self.decay_rate)
             self.glow_radius = viz.get('glow_radius', self.glow_radius)
             self.glow_intensity = viz.get('glow_intensity', self.glow_intensity)
+            self.beam_sharpness = viz.get('beam_sharpness', self.beam_sharpness)
             if 'background_color' in viz:
                 self.background_color = tuple(viz['background_color'])
 
@@ -146,7 +148,8 @@ class Application:
             decay_rate=config.decay_rate,
             glow_radius=config.glow_radius,
             glow_intensity=config.glow_intensity,
-            background_color=config.background_color
+            background_color=config.background_color,
+            beam_sharpness=config.beam_sharpness
         )
 
         self.audio_processor = AudioProcessor(
@@ -296,6 +299,12 @@ class Application:
                     # Clear persistence buffer
                     self.renderer.clear()
 
+                elif event.key == pygame.K_LEFTBRACKET:
+                    self._adjust_beam_sharpness(-0.5)
+
+                elif event.key == pygame.K_RIGHTBRACKET:
+                    self._adjust_beam_sharpness(0.5)
+
             elif event.type == pygame.VIDEORESIZE:
                 self.width = event.w
                 self.height = event.h
@@ -375,6 +384,13 @@ class Application:
         self.renderer.set_glow_intensity(new_intensity)
         print(f"Glow intensity: {new_intensity:.1f}")
 
+    def _adjust_beam_sharpness(self, delta: float):
+        """Adjust beam sharpness."""
+        new_sharpness = self.renderer.beam_sharpness + delta
+        new_sharpness = max(0.5, min(10.0, new_sharpness))
+        self.renderer.set_beam_sharpness(new_sharpness)
+        print(f"Beam sharpness: {new_sharpness:.1f}")
+
     def _cleanup(self):
         """Clean up resources."""
         pygame.mixer.music.stop()
@@ -412,7 +428,8 @@ def main():
     print("  R         - Restart track")
     print("  C         - Clear display")
     print("  +/-       - Adjust persistence")
-    print("  Up/Down   - Adjust glow")
+    print("  Up/Down   - Adjust glow intensity")
+    print("  [/]       - Adjust beam sharpness")
     print("  Q/Esc     - Quit")
     print()
 

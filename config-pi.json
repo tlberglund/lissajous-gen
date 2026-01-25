@@ -11,6 +11,7 @@
     "decay_rate": 0.7,
     "glow_radius": 4,
     "glow_intensity": 1.5,
+    "beam_sharpness": 3.0,
     "background_color": [0.0, 0.0, 0.0]
   },
   "audio": {

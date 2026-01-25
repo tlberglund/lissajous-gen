@@ -37,27 +37,60 @@ def get_precision() -> str:
 GL_VERSION = get_gl_version()
 PRECISION = get_precision()
 
-# Shader sources
-VERTEX_SHADER = f"""
+# Shader sources for anti-aliased line rendering
+# Lines are rendered as quads with smooth distance-based falloff
+
+LINE_VERTEX_SHADER = f"""
 {GL_VERSION}
 {PRECISION}
 
 in vec2 position;
+in vec2 normal;
+in float dist_from_center;
+
+out float v_dist;
+
+uniform vec2 resolution;
+uniform float line_width;
 
 void main() {{
-    gl_Position = vec4(position, 0.0, 1.0);
+    // Expand the line by the normal, scaled by line width
+    // Convert line width from pixels to NDC
+    vec2 pixel_size = 2.0 / resolution;
+    vec2 offset = normal * line_width * 0.5 * pixel_size;
+
+    vec2 pos = position + offset;
+    gl_Position = vec4(pos, 0.0, 1.0);
+    v_dist = dist_from_center;
 }}
 """
 
-FRAGMENT_SHADER = f"""
+LINE_FRAGMENT_SHADER = f"""
 {GL_VERSION}
 {PRECISION}
 
+in float v_dist;
+
 uniform vec3 trace_color;
+uniform float line_width;
+uniform float beam_sharpness;
+
 out vec4 frag_color;
 
 void main() {{
-    frag_color = vec4(trace_color, 1.0);
+    // Distance from center of line (0 = center, 1 = edge)
+    float d = abs(v_dist);
+
+    // Smooth falloff using a Gaussian-like profile for beam appearance
+    // This creates the classic CRT phosphor look
+    float core = exp(-d * d * beam_sharpness);
+
+    // Anti-aliased edge
+    float edge = 1.0 - smoothstep(0.8, 1.0, d);
+
+    float alpha = core * edge;
+
+    frag_color = vec4(trace_color * alpha, alpha);
 }}
 """
 
@@ -170,7 +203,8 @@ class OscilloscopeRenderer:
                  decay_rate: float = 0.7,
                  glow_radius: int = 8,
                  glow_intensity: float = 1.8,
-                 background_color: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
+                 background_color: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+                 beam_sharpness: float = 3.0):
 
         self.ctx = ctx
         self.width = width
@@ -181,6 +215,7 @@ class OscilloscopeRenderer:
         self.glow_radius = glow_radius
         self.glow_intensity = glow_intensity
         self.background_color = background_color
+        self.beam_sharpness = beam_sharpness  # Controls how sharp the beam core is
 
         # Create shader programs
         self._create_shaders()
@@ -191,19 +226,25 @@ class OscilloscopeRenderer:
         # Create fullscreen quad for post-processing
         self._create_fullscreen_quad()
 
-        # Create vertex buffer for trace (will be updated each frame)
-        self.trace_vbo = self.ctx.buffer(reserve=4096 * 2 * 4)  # Reserve space for 4096 vertices
-        self.trace_vao = self.ctx.vertex_array(
-            self.trace_program,
-            [(self.trace_vbo, '2f', 'position')]
+        # Create vertex buffer for anti-aliased line geometry
+        # Each line segment needs 6 vertices (2 triangles)
+        # Each vertex: position(2) + normal(2) + dist(1) = 5 floats
+        max_segments = 4096
+        self.line_vbo = self.ctx.buffer(reserve=max_segments * 6 * 5 * 4)
+        self.line_vao = self.ctx.vertex_array(
+            self.line_program,
+            [(self.line_vbo, '2f 2f 1f', 'position', 'normal', 'dist_from_center')]
         )
+
+        # Index buffer for drawing quads as triangles
+        self.max_points = max_segments + 1
 
     def _create_shaders(self):
         """Create all shader programs."""
-        # Trace drawing shader
-        self.trace_program = self.ctx.program(
-            vertex_shader=VERTEX_SHADER,
-            fragment_shader=FRAGMENT_SHADER
+        # Anti-aliased line drawing shader
+        self.line_program = self.ctx.program(
+            vertex_shader=LINE_VERTEX_SHADER,
+            fragment_shader=LINE_FRAGMENT_SHADER
         )
 
         # Decay shader for persistence effect
@@ -350,27 +391,113 @@ class OscilloscopeRenderer:
 
         self.decay_vao.render(moderngl.TRIANGLE_STRIP)
 
+    def _generate_line_geometry(self, points: np.ndarray) -> np.ndarray:
+        """Generate anti-aliased line geometry from a series of points.
+
+        Each line segment becomes a quad (2 triangles, 6 vertices).
+        Each vertex has: position (2), normal (2), dist_from_center (1)
+        """
+        n_points = len(points)
+        if n_points < 2:
+            return np.array([], dtype='f4')
+
+        n_segments = n_points - 1
+        # 6 vertices per segment, 5 floats per vertex
+        vertices = np.zeros((n_segments * 6, 5), dtype='f4')
+
+        for i in range(n_segments):
+            p0 = points[i]
+            p1 = points[i + 1]
+
+            # Direction vector
+            direction = p1 - p0
+            length = np.sqrt(direction[0]**2 + direction[1]**2)
+
+            if length < 1e-6:
+                # Skip degenerate segments
+                continue
+
+            # Normalize direction
+            direction = direction / length
+
+            # Perpendicular (normal) - rotate 90 degrees
+            normal = np.array([-direction[1], direction[0]], dtype='f4')
+
+            # Create 4 corner vertices of the quad
+            # v0, v1 at p0; v2, v3 at p1
+            # dist_from_center: -1 for one side, +1 for other side
+
+            # Triangle 1: v0, v1, v2
+            # Triangle 2: v1, v3, v2
+
+            idx = i * 6
+
+            # v0: p0 - normal (bottom-left)
+            vertices[idx, 0:2] = p0
+            vertices[idx, 2:4] = -normal
+            vertices[idx, 4] = -1.0
+
+            # v1: p0 + normal (top-left)
+            vertices[idx + 1, 0:2] = p0
+            vertices[idx + 1, 2:4] = normal
+            vertices[idx + 1, 4] = 1.0
+
+            # v2: p1 - normal (bottom-right)
+            vertices[idx + 2, 0:2] = p1
+            vertices[idx + 2, 2:4] = -normal
+            vertices[idx + 2, 4] = -1.0
+
+            # Triangle 2
+            # v1: p0 + normal (top-left)
+            vertices[idx + 3, 0:2] = p0
+            vertices[idx + 3, 2:4] = normal
+            vertices[idx + 3, 4] = 1.0
+
+            # v3: p1 + normal (top-right)
+            vertices[idx + 4, 0:2] = p1
+            vertices[idx + 4, 2:4] = normal
+            vertices[idx + 4, 4] = 1.0
+
+            # v2: p1 - normal (bottom-right)
+            vertices[idx + 5, 0:2] = p1
+            vertices[idx + 5, 2:4] = -normal
+            vertices[idx + 5, 4] = -1.0
+
+        return vertices.flatten()
+
     def _draw_trace(self, audio_buffer: np.ndarray):
         """Draw the audio trace onto the persistence texture."""
-        if audio_buffer is None or len(audio_buffer) == 0:
+        if audio_buffer is None or len(audio_buffer) < 2:
             return
 
-        # Prepare vertex data: left channel -> X, right channel -> Y
-        vertices = audio_buffer.astype('f4').flatten()
+        # Generate anti-aliased line geometry
+        points = audio_buffer.astype('f4')
+        vertices = self._generate_line_geometry(points)
+
+        if len(vertices) == 0:
+            return
 
         # Update vertex buffer
-        self.trace_vbo.write(vertices.tobytes())
+        self.line_vbo.write(vertices.tobytes())
 
         # Draw to persistence texture with additive blending
         self.persistence_fbo.use()
 
         self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)  # Additive blending
+        # Use additive blending with alpha for proper accumulation
+        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE)
 
-        self.trace_program['trace_color'].value = self.trace_color
-        self.ctx.line_width = self.trace_width
+        # Set uniforms
+        self.line_program['trace_color'].value = self.trace_color
+        self.line_program['line_width'].value = self.trace_width
+        self.line_program['resolution'].value = (float(self.width), float(self.height))
+        self.line_program['beam_sharpness'].value = self.beam_sharpness
 
-        self.trace_vao.render(moderngl.LINE_STRIP, vertices=len(audio_buffer))
+        # Calculate number of vertices (6 per segment)
+        n_segments = len(audio_buffer) - 1
+        n_vertices = n_segments * 6
+
+        self.line_vao.render(moderngl.TRIANGLES, vertices=n_vertices)
 
         self.ctx.disable(moderngl.BLEND)
 
@@ -444,3 +571,7 @@ class OscilloscopeRenderer:
     def set_glow_radius(self, radius: int):
         """Set the glow blur radius."""
         self.glow_radius = max(1, radius)
+
+    def set_beam_sharpness(self, sharpness: float):
+        """Set the beam sharpness (higher = sharper core, lower = softer)."""
+        self.beam_sharpness = max(0.5, min(10.0, sharpness))
