@@ -1,34 +1,46 @@
 {
+  "input_directory": "./music",
   "display": {
     "resolution": "auto",
     "fullscreen": false
   },
   "visualization": {
     "trace_color": [0.2, 1.0, 0.3],
-    "trace_width": 2.5,
-    "decay_rate": 7.0,
-    "glow_radius": 3.0,
+    "trace_width": 10.0,
+    "persistence_time": 5.0,
+    "decay_rate": 4.0,
+    "glow_radius": 10.0,
     "glow_intensity": 1.0,
-    "beam_sharpness": 3.0,
+    "beam_sharpness": 4.0,
     "background_color": [0.0, 0.1, 0.0]
   },
   "audio": {
     "sample_rate": 44100,
-    "buffer_size": 2048
+    "buffer_size": 2048,
+    "amplitude_scale": 1.5
+  },
+  "playback": {
+    "mode": "sequential",
+    "auto_advance": true
   },
   "signal_generator": {
     "enabled": true,
     "x": {
       "waveform": "sine",
       "keyframes": [
-        {"frequency": 3.0, "phase": 0.0, "amplitude": 0.8}
+        {"frequency": 3.0, "phase": 0.0, "amplitude": 0.9, "duration": 10.0},
+        {"frequency": 5.0, "phase": 0.0, "amplitude": 0.9, "duration": 10.0},
+        {"frequency": 4.0, "phase": 0.0, "amplitude": 0.7, "duration": 10.0}
       ]
     },
     "y": {
       "waveform": "sine",
       "keyframes": [
-        {"frequency": 4.0, "phase": 0.0, "amplitude": 0.8}
+        {"frequency": 4.0, "phase": 0.0, "amplitude": 0.7, "duration": 7.0},
+        {"frequency": 1.0, "phase": 1.57, "amplitude": 0.9, "duration": 7.0},
+        {"frequency": 5.0, "phase": 0.0, "amplitude": 0.9, "duration": 7.0}
       ]
     }
+
   }
 }

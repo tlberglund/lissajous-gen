@@ -1,8 +1,58 @@
 """Signal generator module for built-in Lissajous pattern generation."""
 
 import numpy as np
+import re
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
+
+
+def parse_value(value: Any) -> Union[float, 'RandomValue']:
+    """Parse a config value, which may be a number or a rand() expression.
+
+    Args:
+        value: Either a number or a string like "rand(min, max)"
+
+    Returns:
+        Either a float or a RandomValue instance
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, str):
+        # Try to parse rand(min, max)
+        match = re.match(r'rand\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)', value.strip())
+        if match:
+            min_val = float(match.group(1))
+            max_val = float(match.group(2))
+            return RandomValue(min_val, max_val)
+        # Try to parse as a plain number
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"Cannot parse value: {value}")
+
+    return float(value)
+
+
+class RandomValue:
+    """A value that is randomly generated within a range each cycle."""
+
+    def __init__(self, min_val: float, max_val: float):
+        self.min_val = min_val
+        self.max_val = max_val
+        self.current_value = self.roll()
+
+    def roll(self) -> float:
+        """Generate a new random value."""
+        self.current_value = np.random.uniform(self.min_val, self.max_val)
+        return self.current_value
+
+    def get(self) -> float:
+        """Get the current value."""
+        return self.current_value
+
+    def __repr__(self):
+        return f"RandomValue({self.min_val}, {self.max_val}) = {self.current_value:.3f}"
 
 
 class WaveformGenerator(ABC):
@@ -92,16 +142,59 @@ WAVEFORM_GENERATORS: Dict[str, WaveformGenerator] = {
 
 
 class Keyframe:
-    """A single keyframe with frequency, phase, amplitude, and duration."""
+    """A single keyframe with frequency, phase, amplitude, and duration.
+
+    Values can be either fixed numbers or rand(min, max) expressions that
+    are re-evaluated each time the keyframe cycle loops.
+    """
 
     def __init__(self, data: Dict[str, Any], duration_required: bool = False):
-        self.frequency = float(data.get('frequency', 1.0))
-        self.phase = float(data.get('phase', 0.0))
-        self.amplitude = float(data.get('amplitude', 0.8))
+        # Parse values - may be floats or RandomValue instances
+        self._frequency = parse_value(data.get('frequency', 1.0))
+        self._phase = parse_value(data.get('phase', 0.0))
+        self._amplitude = parse_value(data.get('amplitude', 0.8))
 
         if duration_required and 'duration' not in data:
             raise ValueError("Keyframe 'duration' is required when multiple keyframes are defined")
-        self.duration = float(data.get('duration', 1.0))
+        self._duration = parse_value(data.get('duration', 1.0))
+
+    def _get_value(self, val: Union[float, RandomValue]) -> float:
+        """Get the current value, whether it's fixed or random."""
+        if isinstance(val, RandomValue):
+            return val.get()
+        return val
+
+    @property
+    def frequency(self) -> float:
+        return self._get_value(self._frequency)
+
+    @property
+    def phase(self) -> float:
+        return self._get_value(self._phase)
+
+    @property
+    def amplitude(self) -> float:
+        return self._get_value(self._amplitude)
+
+    @property
+    def duration(self) -> float:
+        return self._get_value(self._duration)
+
+    def reroll(self):
+        """Re-roll all random values for this keyframe."""
+        if isinstance(self._frequency, RandomValue):
+            self._frequency.roll()
+        if isinstance(self._phase, RandomValue):
+            self._phase.roll()
+        if isinstance(self._amplitude, RandomValue):
+            self._amplitude.roll()
+        if isinstance(self._duration, RandomValue):
+            self._duration.roll()
+
+    def has_randoms(self) -> bool:
+        """Check if this keyframe has any random values."""
+        return any(isinstance(v, RandomValue) for v in
+                   [self._frequency, self._phase, self._amplitude, self._duration])
 
     def lerp(self, other: 'Keyframe', t: float) -> tuple:
         """Linearly interpolate between this keyframe and another.
@@ -137,8 +230,9 @@ class AxisConfig:
         self.keyframes: List[Keyframe] = []
         self._parse_keyframes(config)
 
-        # Calculate total cycle duration
-        self.total_duration = sum(kf.duration for kf in self.keyframes)
+        # Track cycle for re-rolling randoms
+        self._current_cycle = 0
+        self._update_total_duration()
 
     def _parse_keyframes(self, config: Dict[str, Any]):
         """Parse keyframes from config, supporting both old and new formats."""
@@ -173,6 +267,40 @@ class AxisConfig:
                 'duration': 1.0
             }))
 
+    def _update_total_duration(self):
+        """Recalculate total cycle duration (needed after rerolling random durations)."""
+        self.total_duration = sum(kf.duration for kf in self.keyframes)
+
+    def reroll_all(self):
+        """Re-roll all random values in all keyframes."""
+        for kf in self.keyframes:
+            kf.reroll()
+        self._update_total_duration()
+
+    def check_cycle(self, time: float) -> bool:
+        """Check if we've entered a new cycle and reroll if needed.
+
+        Args:
+            time: Current time in seconds
+
+        Returns:
+            True if a new cycle started and randoms were rerolled
+        """
+        if self.total_duration <= 0:
+            return False
+
+        current_cycle = int(time / self.total_duration)
+        if current_cycle > self._current_cycle:
+            self._current_cycle = current_cycle
+            self.reroll_all()
+            return True
+        return False
+
+    def reset(self):
+        """Reset cycle tracking and reroll randoms."""
+        self._current_cycle = 0
+        self.reroll_all()
+
     def _get_interpolated_params(self, time: float) -> tuple:
         """Get interpolated frequency, phase, amplitude at given time.
 
@@ -187,14 +315,14 @@ class AxisConfig:
             return (kf.frequency, kf.phase, kf.amplitude)
 
         # Find position in cycle (loop)
-        cycle_time = time % self.total_duration
+        cycle_time = time % self.total_duration if self.total_duration > 0 else 0
 
         # Find current keyframe and interpolation factor
         elapsed = 0.0
         for i, kf in enumerate(self.keyframes):
             if elapsed + kf.duration > cycle_time:
                 # We're in this keyframe's duration
-                t = (cycle_time - elapsed) / kf.duration
+                t = (cycle_time - elapsed) / kf.duration if kf.duration > 0 else 0
                 next_kf = self.keyframes[(i + 1) % len(self.keyframes)]
                 return kf.lerp(next_kf, t)
             elapsed += kf.duration
@@ -276,6 +404,10 @@ class SignalGenerator:
         for i in range(self.buffer_size):
             sample_time = self.current_time + i * dt
 
+            # Check for cycle boundaries and reroll randoms if needed
+            self.x_axis.check_cycle(sample_time)
+            self.y_axis.check_cycle(sample_time)
+
             # Get interpolated parameters at this instant
             x_freq, x_phase_offset, x_amp = self.x_axis._get_interpolated_params(sample_time)
             y_freq, y_phase_offset, y_amp = self.y_axis._get_interpolated_params(sample_time)
@@ -307,6 +439,8 @@ class SignalGenerator:
         self.current_time = 0.0
         self.x_phase = 0.0
         self.y_phase = 0.0
+        self.x_axis.reset()
+        self.y_axis.reset()
 
     def is_finished(self) -> bool:
         """Signal generator never finishes."""
