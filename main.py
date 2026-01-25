@@ -204,6 +204,9 @@ class Application:
             self._handle_events()
 
             if not self.paused:
+                # Sync visualization to actual audio playback position
+                self._sync_visualization_to_audio()
+
                 # Get audio buffer for visualization
                 audio_buffer = self.audio_processor.get_buffer()
 
@@ -310,33 +313,50 @@ class Application:
                 self.height = event.h
                 self.renderer.resize(self.width, self.height)
 
-    def _load_current_track(self) -> bool:
-        """Load the current track from the file manager."""
-        file_path = self.file_manager.get_current_file()
-        if file_path is None:
-            return False
+    def _load_current_track(self, skip_on_error: bool = True) -> bool:
+        """Load the current track from the file manager.
 
-        print(f"Loading: {file_path.name}")
+        Args:
+            skip_on_error: If True, automatically try the next track on failure.
+        """
+        max_attempts = self.file_manager.get_track_count()
+        attempts = 0
 
-        # Stop any current playback
-        pygame.mixer.music.stop()
+        while attempts < max_attempts:
+            file_path = self.file_manager.get_current_file()
+            if file_path is None:
+                return False
 
-        # Load for visualization
-        if not self.audio_processor.load_file(file_path):
-            return False
+            print(f"Loading: {file_path.name}")
 
-        # Load for audio playback
-        try:
-            pygame.mixer.music.load(str(file_path))
-            pygame.mixer.music.play()
-        except Exception as e:
-            print(f"Error playing audio: {e}")
-            # Continue without audio playback
+            # Stop any current playback
+            pygame.mixer.music.stop()
 
-        self.paused = False
-        self.renderer.clear()
+            try:
+                # Load for visualization
+                if not self.audio_processor.load_file(file_path):
+                    raise RuntimeError("Failed to decode audio for visualization")
 
-        return True
+                # Load for audio playback
+                pygame.mixer.music.load(str(file_path))
+                pygame.mixer.music.play()
+
+                self.paused = False
+                self.renderer.clear()
+                return True
+
+            except Exception as e:
+                print(f"Error loading {file_path.name}: {e}")
+                attempts += 1
+
+                if skip_on_error and attempts < max_attempts:
+                    print("Skipping to next track...")
+                    self.file_manager.next_track()
+                else:
+                    return False
+
+        print("No playable tracks found")
+        return False
 
     def _next_track(self) -> bool:
         """Advance to the next track."""
@@ -361,6 +381,18 @@ class Application:
         else:
             pygame.mixer.music.unpause()
             print("Resumed")
+
+    def _sync_visualization_to_audio(self):
+        """Sync visualization position to actual audio playback time."""
+        try:
+            # pygame.mixer.music.get_pos() returns milliseconds since playback started
+            audio_pos_ms = pygame.mixer.music.get_pos()
+            if audio_pos_ms >= 0:
+                audio_pos_seconds = audio_pos_ms / 1000.0
+                self.audio_processor.seek(audio_pos_seconds)
+        except Exception:
+            # If we can't get position, just let visualization run freely
+            pass
 
     def _sync_audio_playback(self):
         """Sync audio playback with visualization position."""

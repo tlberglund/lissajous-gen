@@ -215,6 +215,13 @@ If keyboard/remote input is available:
 - Playlist management
 - Performance optimization for Pi
 
+### Phase 4: Built-in Lissajou generation
+- A configurable option to skip MP3 loading and use an internal signal generator
+- The internal signal generator should offer a sine wave to the X and Y axes
+- X and Y axis need separately configurable phase and frequency coefficients
+- Consider an approach that would allow pluggable functions other than sinusoids, but defer that implementation to a future phase
+
+
 ---
 
 ## Example Libraries (Python)

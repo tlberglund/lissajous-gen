@@ -229,15 +229,17 @@ class OscilloscopeRenderer:
         # Create vertex buffer for anti-aliased line geometry
         # Each line segment needs 6 vertices (2 triangles)
         # Each vertex: position(2) + normal(2) + dist(1) = 5 floats
-        max_segments = 4096
-        self.line_vbo = self.ctx.buffer(reserve=max_segments * 6 * 5 * 4)
+        self.max_segments = 4096
+        self.line_vbo = self.ctx.buffer(reserve=self.max_segments * 6 * 5 * 4)
         self.line_vao = self.ctx.vertex_array(
             self.line_program,
             [(self.line_vbo, '2f 2f 1f', 'position', 'normal', 'dist_from_center')]
         )
 
-        # Index buffer for drawing quads as triangles
-        self.max_points = max_segments + 1
+        # Pre-allocate geometry buffer to avoid per-frame allocations
+        # Shape: (max_segments * 6 vertices, 5 floats per vertex)
+        self._geometry_buffer = np.zeros((self.max_segments * 6, 5), dtype='f4')
+        self.max_points = self.max_segments + 1
 
     def _create_shaders(self):
         """Create all shader programs."""
@@ -391,94 +393,109 @@ class OscilloscopeRenderer:
 
         self.decay_vao.render(moderngl.TRIANGLE_STRIP)
 
-    def _generate_line_geometry(self, points: np.ndarray) -> np.ndarray:
+    def _generate_line_geometry(self, points: np.ndarray) -> int:
         """Generate anti-aliased line geometry from a series of points.
 
         Each line segment becomes a quad (2 triangles, 6 vertices).
         Each vertex has: position (2), normal (2), dist_from_center (1)
+
+        Uses pre-allocated buffer to avoid per-frame allocations.
+
+        Returns:
+            Number of segments generated (multiply by 6 for vertex count).
         """
         n_points = len(points)
         if n_points < 2:
-            return np.array([], dtype='f4')
+            return 0
 
-        n_segments = n_points - 1
-        # 6 vertices per segment, 5 floats per vertex
-        vertices = np.zeros((n_segments * 6, 5), dtype='f4')
+        n_segments = min(n_points - 1, self.max_segments)
+        vertices = self._geometry_buffer
 
         for i in range(n_segments):
             p0 = points[i]
             p1 = points[i + 1]
 
             # Direction vector
-            direction = p1 - p0
-            length = np.sqrt(direction[0]**2 + direction[1]**2)
+            dx = p1[0] - p0[0]
+            dy = p1[1] - p0[1]
+            length = np.sqrt(dx * dx + dy * dy)
 
             if length < 1e-6:
-                # Skip degenerate segments
-                continue
+                # Use a default normal for degenerate segments
+                nx, ny = 0.0, 1.0
+            else:
+                # Normalize and compute perpendicular (normal)
+                inv_length = 1.0 / length
+                # Normal is perpendicular to direction (rotated 90 degrees)
+                nx = -dy * inv_length
+                ny = dx * inv_length
 
-            # Normalize direction
-            direction = direction / length
-
-            # Perpendicular (normal) - rotate 90 degrees
-            normal = np.array([-direction[1], direction[0]], dtype='f4')
-
-            # Create 4 corner vertices of the quad
-            # v0, v1 at p0; v2, v3 at p1
-            # dist_from_center: -1 for one side, +1 for other side
-
-            # Triangle 1: v0, v1, v2
-            # Triangle 2: v1, v3, v2
-
+            # Create 6 vertices for 2 triangles forming a quad
             idx = i * 6
 
             # v0: p0 - normal (bottom-left)
-            vertices[idx, 0:2] = p0
-            vertices[idx, 2:4] = -normal
+            vertices[idx, 0] = p0[0]
+            vertices[idx, 1] = p0[1]
+            vertices[idx, 2] = -nx
+            vertices[idx, 3] = -ny
             vertices[idx, 4] = -1.0
 
             # v1: p0 + normal (top-left)
-            vertices[idx + 1, 0:2] = p0
-            vertices[idx + 1, 2:4] = normal
+            vertices[idx + 1, 0] = p0[0]
+            vertices[idx + 1, 1] = p0[1]
+            vertices[idx + 1, 2] = nx
+            vertices[idx + 1, 3] = ny
             vertices[idx + 1, 4] = 1.0
 
             # v2: p1 - normal (bottom-right)
-            vertices[idx + 2, 0:2] = p1
-            vertices[idx + 2, 2:4] = -normal
+            vertices[idx + 2, 0] = p1[0]
+            vertices[idx + 2, 1] = p1[1]
+            vertices[idx + 2, 2] = -nx
+            vertices[idx + 2, 3] = -ny
             vertices[idx + 2, 4] = -1.0
 
             # Triangle 2
             # v1: p0 + normal (top-left)
-            vertices[idx + 3, 0:2] = p0
-            vertices[idx + 3, 2:4] = normal
+            vertices[idx + 3, 0] = p0[0]
+            vertices[idx + 3, 1] = p0[1]
+            vertices[idx + 3, 2] = nx
+            vertices[idx + 3, 3] = ny
             vertices[idx + 3, 4] = 1.0
 
             # v3: p1 + normal (top-right)
-            vertices[idx + 4, 0:2] = p1
-            vertices[idx + 4, 2:4] = normal
+            vertices[idx + 4, 0] = p1[0]
+            vertices[idx + 4, 1] = p1[1]
+            vertices[idx + 4, 2] = nx
+            vertices[idx + 4, 3] = ny
             vertices[idx + 4, 4] = 1.0
 
             # v2: p1 - normal (bottom-right)
-            vertices[idx + 5, 0:2] = p1
-            vertices[idx + 5, 2:4] = -normal
+            vertices[idx + 5, 0] = p1[0]
+            vertices[idx + 5, 1] = p1[1]
+            vertices[idx + 5, 2] = -nx
+            vertices[idx + 5, 3] = -ny
             vertices[idx + 5, 4] = -1.0
 
-        return vertices.flatten()
+        return n_segments
 
     def _draw_trace(self, audio_buffer: np.ndarray):
         """Draw the audio trace onto the persistence texture."""
         if audio_buffer is None or len(audio_buffer) < 2:
             return
 
-        # Generate anti-aliased line geometry
+        # Generate anti-aliased line geometry into pre-allocated buffer
         points = audio_buffer.astype('f4')
-        vertices = self._generate_line_geometry(points)
+        n_segments = self._generate_line_geometry(points)
 
-        if len(vertices) == 0:
+        if n_segments == 0:
             return
 
-        # Update vertex buffer
-        self.line_vbo.write(vertices.tobytes())
+        # Calculate number of vertices and floats to write
+        n_vertices = n_segments * 6
+        n_floats = n_vertices * 5
+
+        # Update vertex buffer with only the portion we need
+        self.line_vbo.write(self._geometry_buffer[:n_vertices].tobytes())
 
         # Draw to persistence texture with additive blending
         self.persistence_fbo.use()
@@ -492,10 +509,6 @@ class OscilloscopeRenderer:
         self.line_program['line_width'].value = self.trace_width
         self.line_program['resolution'].value = (float(self.width), float(self.height))
         self.line_program['beam_sharpness'].value = self.beam_sharpness
-
-        # Calculate number of vertices (6 per segment)
-        n_segments = len(audio_buffer) - 1
-        n_vertices = n_segments * 6
 
         self.line_vao.render(moderngl.TRIANGLES, vertices=n_vertices)
 
