@@ -18,6 +18,7 @@ import pygame
 
 from audio_processor import AudioProcessor, FileManager
 from renderer import OscilloscopeRenderer, is_raspberry_pi
+from signal_generator import SignalGenerator
 
 
 class Config:
@@ -41,6 +42,19 @@ class Config:
         self.amplitude_scale = 0.9
         self.playback_mode = "sequential"
         self.auto_advance = True
+
+        # Signal generator config (Phase 4)
+        self.signal_generator = {
+            'enabled': False,
+            'x': {
+                'waveform': 'sine',
+                'keyframes': [{'frequency': 3.0, 'phase': 0.0, 'amplitude': 0.8}]
+            },
+            'y': {
+                'waveform': 'sine',
+                'keyframes': [{'frequency': 4.0, 'phase': 0.0, 'amplitude': 0.8}]
+            }
+        }
 
         if config_path:
             self.load(config_path)
@@ -77,6 +91,15 @@ class Config:
             playback = data.get('playback', {})
             self.playback_mode = playback.get('mode', self.playback_mode)
             self.auto_advance = playback.get('auto_advance', self.auto_advance)
+
+            # Signal generator config
+            if 'signal_generator' in data:
+                sig_gen = data['signal_generator']
+                self.signal_generator['enabled'] = sig_gen.get('enabled', False)
+                if 'x' in sig_gen:
+                    self.signal_generator['x'] = sig_gen['x']
+                if 'y' in sig_gen:
+                    self.signal_generator['y'] = sig_gen['y']
 
             print(f"Loaded configuration from {config_path}")
 
@@ -163,8 +186,17 @@ class Application:
             playback_mode=config.playback_mode
         )
 
-        # Audio playback via pygame mixer
-        pygame.mixer.init(frequency=config.sample_rate, size=-16, channels=2)
+        # Signal generator (Phase 4)
+        self.signal_generator = SignalGenerator(
+            config=config.signal_generator,
+            sample_rate=config.sample_rate,
+            buffer_size=config.buffer_size
+        )
+        self.use_signal_generator = config.signal_generator.get('enabled', False)
+
+        # Audio playback via pygame mixer (not needed for signal generator mode)
+        if not self.use_signal_generator:
+            pygame.mixer.init(frequency=config.sample_rate, size=-16, channels=2)
 
         # Clock for frame timing
         self.clock = pygame.time.Clock()
@@ -179,6 +211,11 @@ class Application:
 
     def run(self):
         """Main application loop."""
+        # Check if using signal generator mode
+        if self.use_signal_generator:
+            self._run_signal_generator_mode()
+            return
+
         # Scan for music files
         track_count = self.file_manager.scan_directory()
         if track_count == 0:
@@ -224,6 +261,46 @@ class Application:
                 # Render frame
                 self.renderer.render_frame(audio_buffer, dt)
 
+            else:
+                # When paused, still render but with no new data
+                self.renderer.render_frame(np.zeros((1, 2), dtype=np.float32), dt)
+
+            pygame.display.flip()
+
+        self._cleanup()
+
+    def _run_signal_generator_mode(self):
+        """Run using the built-in signal generator."""
+        x_cfg = self.config.signal_generator['x']
+        y_cfg = self.config.signal_generator['y']
+        print("Running in signal generator mode")
+
+        # Display axis info
+        for axis_name, cfg in [('X', x_cfg), ('Y', y_cfg)]:
+            waveform = cfg.get('waveform', 'sine')
+            keyframes = cfg.get('keyframes', [])
+            if keyframes:
+                n_kf = len(keyframes)
+                if n_kf == 1:
+                    kf = keyframes[0]
+                    print(f"  {axis_name}: {waveform} @ {kf.get('frequency', 1.0)} Hz")
+                else:
+                    total_dur = sum(kf.get('duration', 0) for kf in keyframes)
+                    print(f"  {axis_name}: {waveform}, {n_kf} keyframes, {total_dur:.1f}s cycle")
+
+        print("Press Q or ESC to quit, R to reset")
+
+        self.running = True
+
+        while self.running:
+            dt = self.clock.tick(self.target_fps) / 1000.0
+
+            self._handle_events()
+
+            if not self.paused:
+                # Get buffer from signal generator
+                buffer = self.signal_generator.get_buffer()
+                self.renderer.render_frame(buffer, dt)
             else:
                 # When paused, still render but with no new data
                 self.renderer.render_frame(np.zeros((1, 2), dtype=np.float32), dt)
@@ -294,9 +371,13 @@ class Application:
                     self._adjust_glow(-0.1)
 
                 elif event.key == pygame.K_r:
-                    # Reset/restart current track
-                    self.audio_processor.reset()
-                    self._sync_audio_playback()
+                    # Reset/restart current track or signal generator
+                    if self.use_signal_generator:
+                        self.signal_generator.reset()
+                        print("Signal generator reset")
+                    else:
+                        self.audio_processor.reset()
+                        self._sync_audio_playback()
 
                 elif event.key == pygame.K_c:
                     # Clear persistence buffer
@@ -425,8 +506,12 @@ class Application:
 
     def _cleanup(self):
         """Clean up resources."""
-        pygame.mixer.music.stop()
-        pygame.mixer.quit()
+        if not self.use_signal_generator:
+            try:
+                pygame.mixer.music.stop()
+                pygame.mixer.quit()
+            except Exception:
+                pass
         pygame.quit()
 
 
@@ -449,7 +534,11 @@ def main():
     print(f"Platform: {platform.system()}")
     if is_raspberry_pi():
         print("Detected: Raspberry Pi")
-    print(f"Music directory: {config.input_directory}")
+    if config.signal_generator.get('enabled', False):
+        print("Mode: Signal Generator")
+    else:
+        print(f"Mode: MP3 Playback")
+        print(f"Music directory: {config.input_directory}")
     print(f"Resolution: {config.resolution}")
     print(f"Fullscreen: {config.fullscreen}")
     print()
