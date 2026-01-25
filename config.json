@@ -1,0 +1,25 @@
+{
+  "input_directory": "./music",
+  "display": {
+    "resolution": "auto",
+    "fullscreen": false
+  },
+  "visualization": {
+    "trace_color": [0.2, 1.0, 0.3],
+    "trace_width": 2.5,
+    "persistence_time": 0.1,
+    "decay_rate": 7.0,
+    "glow_radius": 1.2,
+    "glow_intensity": 0.5,
+    "background_color": [0.0, 0.1, 0.0]
+  },
+  "audio": {
+    "sample_rate": 44100,
+    "buffer_size": 2048,
+    "amplitude_scale": 1.5
+  },
+  "playback": {
+    "mode": "sequential",
+    "auto_advance": true
+  }
+}

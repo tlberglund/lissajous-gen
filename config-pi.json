@@ -1,0 +1,25 @@
+{
+  "input_directory": "/home/pi/music",
+  "display": {
+    "resolution": "auto",
+    "fullscreen": true
+  },
+  "visualization": {
+    "trace_color": [0.2, 1.0, 0.3],
+    "trace_width": 2.0,
+    "persistence_time": 1.5,
+    "decay_rate": 0.7,
+    "glow_radius": 4,
+    "glow_intensity": 1.5,
+    "background_color": [0.0, 0.0, 0.0]
+  },
+  "audio": {
+    "sample_rate": 44100,
+    "buffer_size": 1024,
+    "amplitude_scale": 0.9
+  },
+  "playback": {
+    "mode": "sequential",
+    "auto_advance": true
+  }
+}
