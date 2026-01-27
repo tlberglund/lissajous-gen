@@ -232,6 +232,7 @@ class AxisConfig:
 
         # Track cycle for re-rolling randoms
         self._current_cycle = 0
+        self._current_kf_index = 0
         self._update_total_duration()
 
     def _parse_keyframes(self, config: Dict[str, Any]):
@@ -277,28 +278,54 @@ class AxisConfig:
             kf.reroll()
         self._update_total_duration()
 
-    def check_cycle(self, time: float) -> bool:
-        """Check if we've entered a new cycle and reroll if needed.
+    def _find_keyframe_index(self, time: float) -> int:
+        """Find the keyframe index for the segment we're interpolating FROM.
 
         Args:
             time: Current time in seconds
 
         Returns:
-            True if a new cycle started and randoms were rerolled
+            Index of the current keyframe segment
         """
         if self.total_duration <= 0:
-            return False
+            return 0
+        cycle_time = time % self.total_duration
+        elapsed = 0.0
+        for i, kf in enumerate(self.keyframes):
+            if elapsed + kf.duration > cycle_time:
+                return i
+            elapsed += kf.duration
+        return len(self.keyframes) - 1
 
-        current_cycle = int(time / self.total_duration)
-        if current_cycle > self._current_cycle:
-            self._current_cycle = current_cycle
-            self.reroll_all()
-            return True
-        return False
+    def advance(self, time: float):
+        """Advance time, pre-rolling the next keyframe's randoms when segments change.
+
+        Args:
+            time: Current time in seconds
+        """
+        if self.total_duration <= 0:
+            return
+
+        if len(self.keyframes) == 1:
+            # Single keyframe: reroll at cycle boundary (preserves original behavior)
+            current_cycle = int(time / self.total_duration)
+            if current_cycle > self._current_cycle:
+                self._current_cycle = current_cycle
+                self.reroll_all()
+            return
+
+        idx = self._find_keyframe_index(time)
+        if idx != self._current_kf_index:
+            self._current_kf_index = idx
+            # Pre-roll the keyframe we'll interpolate toward NEXT
+            preroll_idx = (idx + 2) % len(self.keyframes)
+            self.keyframes[preroll_idx].reroll()
+            self._update_total_duration()
 
     def reset(self):
         """Reset cycle tracking and reroll randoms."""
         self._current_cycle = 0
+        self._current_kf_index = 0
         self.reroll_all()
 
     def _get_interpolated_params(self, time: float) -> tuple:
@@ -405,8 +432,8 @@ class SignalGenerator:
             sample_time = self.current_time + i * dt
 
             # Check for cycle boundaries and reroll randoms if needed
-            self.x_axis.check_cycle(sample_time)
-            self.y_axis.check_cycle(sample_time)
+            self.x_axis.advance(sample_time)
+            self.y_axis.advance(sample_time)
 
             # Get interpolated parameters at this instant
             x_freq, x_phase_offset, x_amp = self.x_axis._get_interpolated_params(sample_time)
