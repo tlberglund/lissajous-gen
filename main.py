@@ -157,7 +157,10 @@ class Application:
         pygame.display.set_mode((self.width, self.height), flags)
 
         # Create OpenGL context
-        self.ctx = moderngl.create_context()
+        if is_raspberry_pi():
+            self.ctx = moderngl.create_context(require=310)
+        else:
+            self.ctx = moderngl.create_context()
         print(f"OpenGL: {self.ctx.info['GL_RENDERER']}")
         print(f"Version: {self.ctx.info['GL_VERSION']}")
 
