@@ -251,7 +251,7 @@ class AxisConfig:
             # Convert to single keyframe
             frequency = config.get('frequency', [1.0])
             phase = config.get('phase', [0.0])
-            amplitude = config.get('amplitude', [0.8])
+            amplitude = config.get('amplitude', [0.9])
 
             # Handle both scalar and array inputs
             if not isinstance(frequency, list):

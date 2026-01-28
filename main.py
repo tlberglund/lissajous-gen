@@ -387,10 +387,10 @@ class Application:
                     self.renderer.clear()
 
                 elif event.key == pygame.K_LEFTBRACKET:
-                    self._adjust_beam_sharpness(-0.5)
+                    self._adjust_beam_sharpness(-0.25)
 
                 elif event.key == pygame.K_RIGHTBRACKET:
-                    self._adjust_beam_sharpness(0.5)
+                    self._adjust_beam_sharpness(0.25)
 
             elif event.type == pygame.VIDEORESIZE:
                 self.width = event.w
@@ -489,21 +489,21 @@ class Application:
     def _adjust_persistence(self, delta: float):
         """Adjust decay rate."""
         new_rate = self.renderer.decay_rate + delta
-        new_rate = max(0.1, min(2.0, new_rate))
+        new_rate = max(0.1, min(10.0, new_rate))
         self.renderer.set_decay_rate(new_rate)
         print(f"Decay rate: {new_rate:.1f}")
 
     def _adjust_glow(self, delta: float):
         """Adjust glow intensity."""
         new_intensity = self.renderer.glow_intensity + delta
-        new_intensity = max(0.0, min(5.0, new_intensity))
+        new_intensity = max(0.0, min(10.0, new_intensity))
         self.renderer.set_glow_intensity(new_intensity)
         print(f"Glow intensity: {new_intensity:.1f}")
 
     def _adjust_beam_sharpness(self, delta: float):
         """Adjust beam sharpness."""
         new_sharpness = self.renderer.beam_sharpness + delta
-        new_sharpness = max(0.5, min(10.0, new_sharpness))
+        new_sharpness = max(0.1, min(10.0, new_sharpness))
         self.renderer.set_beam_sharpness(new_sharpness)
         print(f"Beam sharpness: {new_sharpness:.1f}")
 

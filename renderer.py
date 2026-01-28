@@ -215,7 +215,7 @@ class OscilloscopeRenderer:
         self.glow_radius = glow_radius
         self.glow_intensity = glow_intensity
         self.background_color = background_color
-        self.beam_sharpness = beam_sharpness  # Controls how sharp the beam core is
+        self.beam_sharpness = beam_sharpness
 
         # Create shader programs
         self._create_shaders()
