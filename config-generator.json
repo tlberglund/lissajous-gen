@@ -1,8 +1,7 @@
 {
-  "input_directory": "./music",
   "display": {
     "resolution": "auto",
-    "fullscreen": false
+    "fullscreen": true
   },
   "visualization": {
     "trace_color": [0.2, 1.0, 0.3],
@@ -14,29 +13,19 @@
     "beam_sharpness": 4.0,
     "background_color": [0.0, 0.1, 0.0]
   },
-  "audio": {
-    "sample_rate": 44100,
-    "buffer_size": 2048,
-    "amplitude_scale": 1.5
-  },
-  "playback": {
-    "mode": "sequential",
-    "auto_advance": true
-  },
   "signal_generator": {
     "enabled": true,
     "x": {
       "waveform": "sine",
-      "keyframes": [
-        {"frequency": 3.0, "phase": "rand(0,1.57)", "amplitude": 0.9, "duration": 5.0}
-      ]
+       "frequency": 1.0, 
+       "phase": "0.78", 
+       "amplitude": 0.9
     },
     "y": {
       "waveform": "sine",
-      "keyframes": [
-        {"frequency": 1.0, "phase": 0.0, "amplitude": 0.9, "duration": 5.0}
-      ]
+      "frequency": 3.0, 
+      "phase": 0.0, 
+      "amplitude": 0.9
     }
-
   }
 }
