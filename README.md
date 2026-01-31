@@ -2,7 +2,7 @@
 
 Do you want to be a mad scientist, or just look like one? Then this project is for you.
 
-A lissajous figure is a pattern created on an oscilloscope, and it's an absolutely necessary piece of production design in the background of every mad scientist's lab in any film meant to be taken seriously. Your home office may not be such a film, but that doesn't mean you should slack off on your background.
+A lissajous figure is a pattern created on an oscilloscope, and it's an absolutely necessary piece of production design in the background of every mad scientist's lab in any film meant to be taken seriously. Your home office may not be such a film, but I don't accept excuses—only _results_.
 
 Scopes, whether the old analog kind or the modern digital variety, typically have an option to plot two inputs as X and Y coordinates. When you pipe the same sinusoid into both inputs, you get a line on the screen. If you shift the phase of one input by 90˚, you get a circle on the screen. When you vary the frequency and phase of the two inputs by small multiples, you get the cool pattern you see here.
 
