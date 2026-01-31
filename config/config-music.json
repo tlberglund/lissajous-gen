@@ -1,5 +1,5 @@
 {
-  "input_directory": "/home/pi/music",
+  "input_directory": "./music",
   "display": {
     "resolution": "auto",
     "fullscreen": true
