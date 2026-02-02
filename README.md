@@ -18,7 +18,7 @@ The project creates a graphical display that simulates an analog oscilloscope in
 
 ## How to Run This
 
-I've tested on MacOS 26 (as of this writing) and on a Raspberry Pi 1.
+I've tested on MacOS 26 (as of this writing) and on a Raspberry Pi 4 and 5. It will run on a 1GB Pi, but it really needs a 5 to run properly.
 
 ### MacOS
 
