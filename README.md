@@ -28,7 +28,7 @@ I'll generously assume you've got Python installed. You've got this.
 $ python -m venv .venv
 $ source .venv/bin/activate
 $ pip install -r requirements.txt
-$ python src/lissajous.py config/config-xxx.json
+$ python src/lissajous.py config/config-generator.json
 ```
 
 ### Raspberry Pi
@@ -42,7 +42,7 @@ $ source .venv/bin/activate
 $ pip install -U pip
 $ pip install -r requirements.txt
 $ pip install -U audioop-lts
-$ python src/lissajous.py config/config-xxx.json
+$ python src/lissajous.py config/config-generator.json
 ```
 
 ### MP3 Mode
