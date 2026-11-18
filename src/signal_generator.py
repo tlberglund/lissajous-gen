@@ -1,7 +1,9 @@
 """Signal generator module for built-in Lissajous pattern generation."""
 
-import numpy as np
+import copy
 import re
+
+import numpy as np
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional, Union
 
@@ -384,15 +386,85 @@ class AxisConfig:
         return self.generator.generate(t, freq, phase, amp)
 
 
+class _AxisRuntime:
+    """Per-axis playback state: the keyframe loop, its local time, and any glide.
+
+    A glide is a one-shot ramp from the parameters the axis had when it was
+    retargeted to the first keyframe of the new configuration. When the glide
+    finishes, the axis starts its keyframe loop from time 0.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = copy.deepcopy(config)
+        self.axis = AxisConfig(self.config)
+        self.time = 0.0
+        # [from_params (freq, phase, amp), duration, elapsed] or None
+        self.glide: Optional[list] = None
+
+    @property
+    def generator(self) -> WaveformGenerator:
+        return self.axis.generator
+
+    def params(self) -> tuple:
+        """Instantaneous (frequency, phase offset, amplitude)."""
+        if self.glide is not None:
+            start, duration, elapsed = self.glide
+            target = self.axis._get_interpolated_params(0.0)
+            t = min(1.0, elapsed / duration)
+            return tuple(a + (b - a) * t for a, b in zip(start, target))
+        return self.axis._get_interpolated_params(self.time)
+
+    def advance(self):
+        """Let the keyframe loop pre-roll randoms at segment boundaries."""
+        if self.glide is None:
+            self.axis.advance(self.time)
+
+    def step(self, dt: float):
+        if self.glide is not None:
+            self.glide[2] += dt
+            overshoot = self.glide[2] - self.glide[1]
+            if overshoot >= 0:
+                self.glide = None
+                self.time = overshoot
+            return
+        self.time += dt
+
+    def retarget(self, config: Dict[str, Any], transition_time: float):
+        """Switch to a new axis config, gliding from the current parameters."""
+        if config == self.config:
+            return
+        current = self.params()
+        waveform_changed = config.get('waveform', 'sine') != self.config.get('waveform', 'sine')
+        self.config = copy.deepcopy(config)
+        self.axis = AxisConfig(self.config)
+        self.time = 0.0
+        if transition_time > 0 and not waveform_changed:
+            self.glide = [current, transition_time, 0.0]
+        else:
+            self.glide = None
+
+    def reset(self):
+        self.time = 0.0
+        self.glide = None
+        self.axis.reset()
+
+
 class SignalGenerator:
-    """Generates Lissajous patterns from configured waveforms."""
+    """Generates Lissajous patterns from configured waveforms.
+
+    Signal time follows the wall clock: get_buffer(dt) produces exactly the
+    samples covering dt seconds (capped at buffer_size), so keyframe
+    durations are real seconds regardless of frame rate.
+    """
+
+    DEFAULT_TRANSITION_TIME = 1.5
 
     def __init__(self, config: Dict[str, Any], sample_rate: int = 44100, buffer_size: int = 2048):
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
         self.enabled = config.get('enabled', False)
+        self.transition_time = config.get('transition_time', self.DEFAULT_TRANSITION_TIME)
 
-        # Parse X and Y axis configurations
         default_x = {
             'waveform': 'sine',
             'keyframes': [{'frequency': 3.0, 'phase': 0.0, 'amplitude': 0.8}]
@@ -401,73 +473,111 @@ class SignalGenerator:
             'waveform': 'sine',
             'keyframes': [{'frequency': 4.0, 'phase': 0.0, 'amplitude': 0.8}]
         }
-        x_config = config.get('x', default_x)
-        y_config = config.get('y', default_y)
+        self.x = _AxisRuntime(config.get('x', default_x))
+        self.y = _AxisRuntime(config.get('y', default_y))
 
-        self.x_axis = AxisConfig(x_config)
-        self.y_axis = AxisConfig(y_config)
-
-        # Time tracking
+        # Total generated signal time (for status reporting)
         self.current_time = 0.0
+        # Fractional sample carried between frames so the long-run rate is exact
+        self._sample_carry = 0.0
 
-        # Phase accumulators for smooth frequency transitions
-        # This prevents discontinuities when frequency changes
+        # Phase accumulators for smooth frequency transitions. These are never
+        # reset by retarget(), which is what keeps the beam continuous.
         self.x_phase = 0.0
         self.y_phase = 0.0
 
-    def get_buffer(self) -> np.ndarray:
-        """Get the next buffer of generated samples.
+    # Kept for callers that inspect the keyframe loops directly.
+    @property
+    def x_axis(self) -> AxisConfig:
+        return self.x.axis
+
+    @property
+    def y_axis(self) -> AxisConfig:
+        return self.y.axis
+
+    def samples_for(self, dt: float) -> int:
+        """Number of samples covering dt seconds, carrying the remainder."""
+        exact = max(0.0, dt) * self.sample_rate + self._sample_carry
+        n = int(exact)
+        if n > self.buffer_size:
+            # A long stall: cap the buffer and drop the backlog.
+            self._sample_carry = 0.0
+            return self.buffer_size
+        self._sample_carry = exact - n
+        return n
+
+    def get_buffer(self, dt: Optional[float] = None) -> np.ndarray:
+        """Get the samples covering the last dt seconds of signal.
+
+        Args:
+            dt: Elapsed wall-clock time in seconds. If omitted, a full
+                buffer_size block is produced.
 
         Returns:
-            numpy array of shape (buffer_size, 2) with X and Y values
+            numpy array of shape (n, 2) with X and Y values
         """
-        x_values = np.zeros(self.buffer_size, dtype=np.float32)
-        y_values = np.zeros(self.buffer_size, dtype=np.float32)
+        if dt is None:
+            n = self.buffer_size
+        else:
+            n = self.samples_for(dt)
 
-        dt = 1.0 / self.sample_rate
+        x_values = np.zeros(n, dtype=np.float32)
+        y_values = np.zeros(n, dtype=np.float32)
+        sample_dt = 1.0 / self.sample_rate
+        two_pi = 2.0 * np.pi
 
-        # Generate samples one at a time with phase accumulation
-        # This ensures smooth transitions when frequency changes
-        for i in range(self.buffer_size):
-            sample_time = self.current_time + i * dt
+        x, y = self.x, self.y
+        for i in range(n):
+            x.advance()
+            y.advance()
 
-            # Check for cycle boundaries and reroll randoms if needed
-            self.x_axis.advance(sample_time)
-            self.y_axis.advance(sample_time)
+            x_freq, x_phase_offset, x_amp = x.params()
+            y_freq, y_phase_offset, y_amp = y.params()
 
-            # Get interpolated parameters at this instant
-            x_freq, x_phase_offset, x_amp = self.x_axis._get_interpolated_params(sample_time)
-            y_freq, y_phase_offset, y_amp = self.y_axis._get_interpolated_params(sample_time)
-
-            # Generate samples using accumulated phase + offset
-            x_values[i] = x_amp * self.x_axis.generator.generate_sample(
-                self.x_phase + x_phase_offset)
-            y_values[i] = y_amp * self.y_axis.generator.generate_sample(
-                self.y_phase + y_phase_offset)
+            x_values[i] = x_amp * x.generator.generate_sample(self.x_phase + x_phase_offset)
+            y_values[i] = y_amp * y.generator.generate_sample(self.y_phase + y_phase_offset)
 
             # Advance phase accumulators based on instantaneous frequency
-            self.x_phase += 2.0 * np.pi * x_freq * dt
-            self.y_phase += 2.0 * np.pi * y_freq * dt
+            self.x_phase += two_pi * x_freq * sample_dt
+            self.y_phase += two_pi * y_freq * sample_dt
+            if self.x_phase > two_pi:
+                self.x_phase -= two_pi
+            if self.y_phase > two_pi:
+                self.y_phase -= two_pi
 
-            # Keep phase in reasonable range to avoid float precision issues
-            if self.x_phase > 2.0 * np.pi:
-                self.x_phase -= 2.0 * np.pi
-            if self.y_phase > 2.0 * np.pi:
-                self.y_phase -= 2.0 * np.pi
+            x.step(sample_dt)
+            y.step(sample_dt)
 
-        # Advance time
-        self.current_time += self.buffer_size * dt
+        self.current_time += n * sample_dt
 
         # Combine into stereo-like format (X=left, Y=right)
         return np.column_stack([x_values, y_values]).astype(np.float32)
 
+    def retarget(self, config: Dict[str, Any]):
+        """Apply a new generator config without resetting oscillator phase.
+
+        Axes whose config changed glide from their current parameters to the
+        new first keyframe over transition_time seconds (0 = snap). A waveform
+        change on an axis snaps that axis. Unchanged axes are left alone.
+        """
+        self.transition_time = config.get('transition_time', self.transition_time)
+        if 'x' in config:
+            self.x.retarget(config['x'], self.transition_time)
+        if 'y' in config:
+            self.y.retarget(config['y'], self.transition_time)
+
+    def instantaneous_params(self) -> tuple:
+        """((x_freq, x_phase, x_amp), (y_freq, y_phase, y_amp)) right now."""
+        return self.x.params(), self.y.params()
+
     def reset(self):
         """Reset the generator to the beginning."""
         self.current_time = 0.0
+        self._sample_carry = 0.0
         self.x_phase = 0.0
         self.y_phase = 0.0
-        self.x_axis.reset()
-        self.y_axis.reset()
+        self.x.reset()
+        self.y.reset()
 
     def is_finished(self) -> bool:
         """Signal generator never finishes."""

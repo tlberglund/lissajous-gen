@@ -54,6 +54,37 @@ The project doesn't yet include any MP3s, but if you'd like to pursue this path,
 
 If you want actual lissajous figures, this is the mode for you. You can configure the sinusoids to be generated on the X and Y inputs of the virtual scope, including relative frequency, phase (of course, when is phase not relative?), and amplitude relationships between the two axes. You can even provide a list of sinusoid definitions as keyframes to be animated.
 
+### Remote Control (Web Panel)
+
+Once your scope is bolted to the wall of the lab, you don't want to SSH into it every time inspiration strikes. The visualizer runs a small web server, so any phone or laptop on your local network can drive it. When it starts, it prints the address:
+
+```
+Web interface: http://localhost:8080/
+  on the LAN: http://192.168.1.216:8080/
+```
+
+Open that address in a browser and you get an oscilloscope front panel: knobs for the beam, a keyframe editor for each channel, a GEN/MUSIC source switch, a track list for music mode, and presets.
+
+* **Changes are live.** Turn a knob and the wall follows within a fraction of a second. Generator changes *glide* from the current figure to the new one over `signal_generator.transition_time` seconds, so the pattern morphs instead of jumping. (Changing a waveform type always snaps, since there is nothing in between a sine and a square.)
+* **Bad values never reach the wall.** If you type something the visualizer can't use, that field turns red with an explanation, and the display keeps showing the last good setting.
+* **Some settings need a restart.** Resolution, fullscreen, sample rate, buffer size, and the web port are saved immediately but take effect on restart. The panel lights an amber RESTART lamp with a button that restarts the visualizer in place.
+* **Knobs:** drag up and down to turn them, or tap the number under a knob to type an exact value. Phase is shown in degrees and stored in radians.
+* **No password.** Anyone on your network can change the display. In return, the worst they can do is change your oscilloscope's color.
+
+#### Where the settings live
+
+The running configuration is saved to `config/active.json` (it's in `.gitignore`). On startup, if `config/active.json` exists, it wins, so your web edits survive a reboot. The config file you pass on the command line (as in the systemd unit) is only used to create `active.json` the first time. To start over from that file, add `--reset`:
+
+```sh
+$ python src/lissajous.py --reset config/config-generator.json
+```
+
+Every other `config/*.json` file is a **preset**. The panel can load presets and save the current settings as a new one.
+
+#### Running under systemd
+
+No changes to your unit are needed. Restarts from the panel replace the process in place. `Restart=always` is still a good idea as a backstop.
+
 ### Config File Docs
 
 The generator is fairly configurable. There are several example config files included with the project, plus a full reference to all the parameters below.
@@ -74,7 +105,7 @@ All configuration options with their types, defaults, and descriptions.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `input_directory` | string | `null` | Path to directory containing audio files. Required for music mode; ignored when signal generator is enabled. |
+| `input_directory` | string | `"./music"` | Path to directory containing audio files for music mode. Fixed while the visualizer runs; the web panel can't change it. |
 
 ---
 
@@ -84,8 +115,8 @@ Controls the application window.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `resolution` | string or [int, int] | `"auto"` | Window size. Use `"auto"` for automatic sizing, or specify `[width, height]` in pixels. |
-| `fullscreen` | boolean | `false` | Run in fullscreen mode. |
+| `resolution` | string or [int, int] | `"auto"` | Window size. Use `"auto"` for automatic sizing, or specify `[width, height]` (or `"WIDTHxHEIGHT"`) in pixels. Applies on restart. |
+| `fullscreen` | boolean | `false` | Run in fullscreen mode. Applies on restart. |
 
 ---
 
@@ -112,9 +143,9 @@ Controls audio processing parameters.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `sample_rate` | int | `44100` | Audio sample rate in Hz. |
-| `buffer_size` | int | `2048` | Audio buffer size in samples. Smaller values reduce latency but may cause audio glitches. |
-| `amplitude_scale` | float | `0.9` | Scales the input amplitude. Values >1.0 amplify; <1.0 attenuate. |
+| `sample_rate` | int | `44100` | Audio sample rate in Hz. Applies on restart. |
+| `buffer_size` | int | `2048` | Audio buffer size in samples, and the most samples drawn in one frame. Applies on restart. |
+| `amplitude_scale` | float | `0.9` | Scales the music's amplitude on screen (music mode). Values >1.0 amplify; <1.0 attenuate. |
 
 ---
 
@@ -136,8 +167,19 @@ Enables built-in waveform generation instead of audio file input.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable signal generator mode. When `true`, audio files are ignored. |
+| `transition_time` | float | `1.5` | Seconds to glide from the current figure to a new one when the generator settings change. `0` snaps immediately. |
 | `x` | object | *(see below)* | Configuration for the X-axis signal. |
 | `y` | object | *(see below)* | Configuration for the Y-axis signal. |
+
+---
+
+##### `web`
+
+Controls the remote control panel.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `port` | int | `8080` | Port the web panel listens on, on all network interfaces. Applies on restart. If the port is taken, the visualizer logs an error and runs without the panel. |
 
 ---
 
@@ -163,7 +205,7 @@ Each keyframe defines signal parameters for a segment of time. The signal smooth
 | `frequency` | float or string | `1.0` | Frequency in Hz. Accepts `rand(min, max)` for randomization. |
 | `phase` | float or string | `0.0` | Phase offset in radians. Accepts `rand(min, max)` for randomization. |
 | `amplitude` | float or string | `0.8` | Signal amplitude (0.0 to 1.0). Accepts `rand(min, max)` for randomization. |
-| `duration` | float or string | `1.0` | Duration of this keyframe segment in seconds. Required when multiple keyframes are defined. Accepts `rand(min, max)` for randomization. |
+| `duration` | float or string | `1.0` | Duration of this keyframe segment in real (wall-clock) seconds. Required when multiple keyframes are defined. Accepts `rand(min, max)` for randomization. |
 
 ---
 
@@ -184,6 +226,7 @@ Any keyframe parameter can use the `rand(min, max)` syntax to generate a random 
 
 ##### Keyframe Behavior
 
+- **Timing:** durations are wall-clock seconds on every machine. (Before the web panel arrived, keyframes ran about 1.4x fast on a Pi and 2.8x fast on a Mac. If an old config feels sluggish now, that's why.)
 - **Single keyframe:** The signal uses constant parameters. Random values are reevaluated at each cycle boundary.
 - **Multiple keyframes:** Parameters smoothly interpolate from one keyframe to the next. Random values are reevaluated one keyframe ahead to ensure smooth transitions.
 - **Looping:** Keyframes loop continuously. The last keyframe interpolates back to the first.

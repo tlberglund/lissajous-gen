@@ -6,116 +6,84 @@ Creates Lissajous-style patterns from stereo audio files,
 using the left channel for X and right channel for Y coordinates.
 """
 
-import json
+import argparse
+import copy
+import os
 import platform
 import sys
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import moderngl
 import numpy as np
 import pygame
 
 from audio_processor import AudioProcessor, FileManager
+from config_store import DEFAULTS, DebouncedWriter, PresetStore, load_startup_config
+from control import AppState, ApplyConfig, Restart, Transport, apply_config, drain
 from renderer import OscilloscopeRenderer, is_raspberry_pi
 from signal_generator import SignalGenerator
+from sources import GeneratorSource, MusicSource, PygameMixer
+from web_server import start_web_server
+
+
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
 
 class Config:
-    """Application configuration."""
+    """Application configuration, backed by a normalized config document.
 
-    def __init__(self, config_path: Optional[str] = None):
-        # Default values
-        self.input_directory = "./music"
-        self.resolution = "auto"
-        self.fullscreen = False
-        self.trace_color = (0.2, 1.0, 0.3)
-        self.trace_width = 2.0
-        self.persistence_time = 1.5
-        self.decay_rate = 0.7
-        self.glow_radius = 8
-        self.glow_intensity = 1.8
-        self.background_color = (0.0, 0.0, 0.0)
-        self.beam_sharpness = 3.0
-        self.sample_rate = 44100
-        self.buffer_size = 2048
-        self.amplitude_scale = 0.9
-        self.playback_mode = "sequential"
-        self.auto_advance = True
+    The document (see config_store.DEFAULTS) is the source of truth; the
+    attributes are a convenience view used by Application.
+    """
 
-        # Signal generator config (Phase 4)
-        self.signal_generator = {
-            'enabled': False,
-            'x': {
-                'waveform': 'sine',
-                'keyframes': [{'frequency': 3.0, 'phase': 0.0, 'amplitude': 0.8}]
-            },
-            'y': {
-                'waveform': 'sine',
-                'keyframes': [{'frequency': 4.0, 'phase': 0.0, 'amplitude': 0.8}]
-            }
-        }
+    def __init__(self, doc: Optional[Dict[str, Any]] = None):
+        self.doc: Dict[str, Any] = copy.deepcopy(doc if doc is not None else DEFAULTS)
+        d = self.doc
 
-        if config_path:
-            self.load(config_path)
+        self.input_directory = d["input_directory"]
 
-    def load(self, config_path: str):
-        """Load configuration from JSON file."""
-        try:
-            with open(config_path, 'r') as f:
-                data = json.load(f)
+        self.resolution = d["display"]["resolution"]
+        self.fullscreen = d["display"]["fullscreen"]
 
-            self.input_directory = data.get('input_directory', self.input_directory)
+        viz = d["visualization"]
+        self.trace_color = tuple(viz["trace_color"])
+        self.trace_width = viz["trace_width"]
+        self.persistence_time = viz["persistence_time"]
+        self.decay_rate = viz["decay_rate"]
+        self.glow_radius = viz["glow_radius"]
+        self.glow_intensity = viz["glow_intensity"]
+        self.background_color = tuple(viz["background_color"])
+        self.beam_sharpness = viz["beam_sharpness"]
 
-            display = data.get('display', {})
-            self.resolution = display.get('resolution', self.resolution)
-            self.fullscreen = display.get('fullscreen', self.fullscreen)
+        self.sample_rate = d["audio"]["sample_rate"]
+        self.buffer_size = d["audio"]["buffer_size"]
+        self.amplitude_scale = d["audio"]["amplitude_scale"]
 
-            viz = data.get('visualization', {})
-            if 'trace_color' in viz:
-                self.trace_color = tuple(viz['trace_color'])
-            self.trace_width = viz.get('trace_width', self.trace_width)
-            self.persistence_time = viz.get('persistence_time', self.persistence_time)
-            self.decay_rate = viz.get('decay_rate', self.decay_rate)
-            self.glow_radius = viz.get('glow_radius', self.glow_radius)
-            self.glow_intensity = viz.get('glow_intensity', self.glow_intensity)
-            self.beam_sharpness = viz.get('beam_sharpness', self.beam_sharpness)
-            if 'background_color' in viz:
-                self.background_color = tuple(viz['background_color'])
+        self.playback_mode = d["playback"]["mode"]
+        self.auto_advance = d["playback"]["auto_advance"]
 
-            audio = data.get('audio', {})
-            self.sample_rate = audio.get('sample_rate', self.sample_rate)
-            self.buffer_size = audio.get('buffer_size', self.buffer_size)
-            self.amplitude_scale = audio.get('amplitude_scale', self.amplitude_scale)
-
-            playback = data.get('playback', {})
-            self.playback_mode = playback.get('mode', self.playback_mode)
-            self.auto_advance = playback.get('auto_advance', self.auto_advance)
-
-            # Signal generator config
-            if 'signal_generator' in data:
-                sig_gen = data['signal_generator']
-                self.signal_generator['enabled'] = sig_gen.get('enabled', False)
-                if 'x' in sig_gen:
-                    self.signal_generator['x'] = sig_gen['x']
-                if 'y' in sig_gen:
-                    self.signal_generator['y'] = sig_gen['y']
-
-            print(f"Loaded configuration from {config_path}")
-
-        except FileNotFoundError:
-            print(f"Config file not found: {config_path}, using defaults")
-        except json.JSONDecodeError as e:
-            print(f"Error parsing config file: {e}, using defaults")
+        self.signal_generator = d["signal_generator"]
+        self.web_port = d["web"]["port"]
 
 
 class Application:
-    """Main application controller."""
+    """Main application controller.
 
-    def __init__(self, config: Config):
+    One render loop draws from whichever source is active (generator or
+    music). Remote changes arrive as commands on state.commands and are
+    applied at the top of each frame, on this (the GL) thread.
+    """
+
+    def __init__(self, config: Config, state: Optional[AppState] = None,
+                 writer: Optional[DebouncedWriter] = None):
         self.config = config
+        self.doc = copy.deepcopy(config.doc)          # the config currently applied
+        self.state = state or AppState(self.doc)
+        self.writer = writer
         self.running = False
-        self.paused = False
+        self.restart_requested = False
         self.is_pi = is_raspberry_pi()
 
         # Initialize pygame
@@ -133,7 +101,7 @@ class Application:
                 self.width = 800 if self.is_pi else 1280
                 self.height = 600 if self.is_pi else 720
         else:
-            self.width, self.height = map(int, config.resolution.split('x'))
+            self.width, self.height = (int(v) for v in config.resolution)
 
         # Set OpenGL attributes before creating display
         if self.is_pi:
@@ -178,169 +146,139 @@ class Application:
             beam_sharpness=config.beam_sharpness
         )
 
-        self.audio_processor = AudioProcessor(
-            sample_rate=config.sample_rate,
-            buffer_size=config.buffer_size,
-            amplitude_scale=config.amplitude_scale
-        )
-
-        self.file_manager = FileManager(
-            input_directory=config.input_directory,
-            playback_mode=config.playback_mode
-        )
-
-        # Signal generator (Phase 4)
-        self.signal_generator = SignalGenerator(
+        self.generator = SignalGenerator(
             config=config.signal_generator,
             sample_rate=config.sample_rate,
             buffer_size=config.buffer_size
         )
-        self.use_signal_generator = config.signal_generator.get('enabled', False)
+        self.generator_source = GeneratorSource(self.generator)
 
-        # Audio playback via pygame mixer (not needed for signal generator mode)
-        if not self.use_signal_generator:
-            pygame.mixer.init(frequency=config.sample_rate, size=-16, channels=2)
+        # The music directory is fixed for the life of the process; the mixer
+        # is only initialized the first time music actually plays.
+        self.mixer = PygameMixer(config.sample_rate)
+        self.music = MusicSource(
+            AudioProcessor(sample_rate=config.sample_rate,
+                           buffer_size=config.buffer_size,
+                           amplitude_scale=config.amplitude_scale),
+            FileManager(input_directory=config.input_directory,
+                        playback_mode=config.playback_mode),
+            self.mixer,
+            auto_advance=config.auto_advance,
+        )
+
+        self.source = None
+        self.switch_source("generator" if config.signal_generator.get("enabled") else "music")
 
         # Clock for frame timing
         self.clock = pygame.time.Clock()
         # Lower FPS on Pi for better performance
         self.target_fps = 30 if self.is_pi else 60
-
-        # Samples per frame calculation for visualization sync
-        self.samples_per_frame = config.sample_rate // self.target_fps
+        self._last_snapshot = 0.0
 
         if self.is_pi:
             print("Running on Raspberry Pi - using optimized settings")
 
+    # -- sources ------------------------------------------------------------
+
+    def switch_source(self, name: str):
+        """Make `name` ("generator" or "music") the active source."""
+        new = self.generator_source if name == "generator" else self.music
+        if new is self.source:
+            return
+        if self.source is not None:
+            self.source.stop()
+        self.source = new
+        self.renderer.clear()
+        new.start()
+        if name == "music" and not self.music.tracks():
+            print(f"No MP3 files found in {self.config.input_directory}")
+        print(f"Source: {name}")
+        self._publish_snapshot()
+
+    # -- main loop ----------------------------------------------------------
+
     def run(self):
         """Main application loop."""
-        # Check if using signal generator mode
-        if self.use_signal_generator:
-            self._run_signal_generator_mode()
-            return
-
-        # Scan for music files
-        track_count = self.file_manager.scan_directory()
-        if track_count == 0:
-            print(f"No MP3 files found in {self.config.input_directory}")
-            print("Please add MP3 files to the music directory and restart.")
-            # Run in demo mode with no audio
-            self._run_demo_mode()
-            return
-
-        print(f"Found {track_count} tracks")
-
-        # Load first track
-        if not self._load_current_track():
-            print("Failed to load first track")
-            return
-
-        self.running = True
-
-        while self.running:
-            dt = self.clock.tick(self.target_fps) / 1000.0  # Delta time in seconds
-
-            # Handle events
-            self._handle_events()
-
-            if not self.paused:
-                # Sync visualization to actual audio playback position
-                self._sync_visualization_to_audio()
-
-                # Get audio buffer for visualization
-                audio_buffer = self.audio_processor.get_buffer()
-
-                if audio_buffer is None or self.audio_processor.is_finished():
-                    # Track finished
-                    if self.config.auto_advance:
-                        if not self._next_track():
-                            print("Playlist finished")
-                            self.running = False
-                            continue
-                    else:
-                        self.paused = True
-                        continue
-
-                # Render frame
-                self.renderer.render_frame(audio_buffer, dt)
-
-            else:
-                # When paused, still render but with no new data
-                self.renderer.render_frame(np.zeros((1, 2), dtype=np.float32), dt)
-
-            pygame.display.flip()
-
-        self._cleanup()
-
-    def _run_signal_generator_mode(self):
-        """Run using the built-in signal generator."""
-        x_cfg = self.config.signal_generator['x']
-        y_cfg = self.config.signal_generator['y']
-        print("Running in signal generator mode")
-
-        # Display axis info
-        for axis_name, cfg in [('X', x_cfg), ('Y', y_cfg)]:
-            waveform = cfg.get('waveform', 'sine')
-            keyframes = cfg.get('keyframes', [])
-            if keyframes:
-                n_kf = len(keyframes)
-                if n_kf == 1:
-                    kf = keyframes[0]
-                    print(f"  {axis_name}: {waveform} @ {kf.get('frequency', 1.0)} Hz")
-                else:
-                    total_dur = sum(kf.get('duration', 0) for kf in keyframes)
-                    print(f"  {axis_name}: {waveform}, {n_kf} keyframes, {total_dur:.1f}s cycle")
-
-        print("Press Q or ESC to quit, R to reset")
-
-        self.running = True
-
-        while self.running:
-            dt = self.clock.tick(self.target_fps) / 1000.0
-
-            self._handle_events()
-
-            if not self.paused:
-                # Get buffer from signal generator
-                buffer = self.signal_generator.get_buffer()
-                self.renderer.render_frame(buffer, dt)
-            else:
-                # When paused, still render but with no new data
-                self.renderer.render_frame(np.zeros((1, 2), dtype=np.float32), dt)
-
-            pygame.display.flip()
-
-        self._cleanup()
-
-    def _run_demo_mode(self):
-        """Run in demo mode without audio files (generates test patterns)."""
-        print("Running in demo mode - generating test patterns")
         print("Press Q or ESC to quit")
-
         self.running = True
-        time_elapsed = 0.0
 
         while self.running:
             dt = self.clock.tick(self.target_fps) / 1000.0
-            time_elapsed += dt
 
             self._handle_events()
+            self._process_commands()
+            if self.writer is not None:
+                self.writer.tick()
+            if self.restart_requested:
+                break
 
-            # Generate Lissajous test pattern
-            t = np.linspace(time_elapsed, time_elapsed + 0.1, self.config.buffer_size)
-            freq_x = 3.0
-            freq_y = 4.0
-            phase = time_elapsed * 0.5
-
-            left = np.sin(2 * np.pi * freq_x * t) * 0.8
-            right = np.sin(2 * np.pi * freq_y * t + phase) * 0.8
-
-            audio_buffer = np.column_stack([left, right]).astype(np.float32)
-
-            self.renderer.render_frame(audio_buffer, dt)
+            buffer = self.source.get_buffer(dt)
+            self.renderer.render_frame(buffer, dt)
             pygame.display.flip()
 
+            now = time.monotonic()
+            if now - self._last_snapshot > 0.5:
+                self._publish_snapshot()
+                self._last_snapshot = now
+
         self._cleanup()
+        if self.restart_requested:
+            self._reexec()
+
+    def _publish_snapshot(self):
+        self.state.update_snapshot(
+            source=self.source.name if self.source else "generator",
+            fps=self.clock.get_fps() if hasattr(self, "clock") else 0.0,
+            tracks=self.music.tracks(),
+            current_track=self.music.current(),
+            playing=self.source is self.music and self.music.playing,
+        )
+
+    # -- remote commands ----------------------------------------------------
+
+    def _process_commands(self):
+        for cmd in drain(self.state.commands):
+            try:
+                if isinstance(cmd, ApplyConfig):
+                    self._apply(cmd.doc)
+                elif isinstance(cmd, Transport):
+                    self._transport(cmd)
+                elif isinstance(cmd, Restart):
+                    self.restart_requested = True
+            except Exception as e:
+                # A bad command must never take the display down
+                print(f"ERROR applying {type(cmd).__name__}: {e!r}")
+
+    def _apply(self, doc: Dict[str, Any]):
+        old, self.doc = self.doc, copy.deepcopy(doc)
+        apply_config(self, old, self.doc)
+        if self.writer is not None:
+            self.writer.update(self.doc)
+
+    def _transport(self, cmd: Transport):
+        if cmd.action == "play":
+            if self.source is not self.music:
+                # Playing a track implies the music source; keep config in step.
+                # Select first so switching sources loads only this track.
+                self.music.select(cmd.track)
+                doc = copy.deepcopy(self.doc)
+                doc["signal_generator"]["enabled"] = False
+                self.state.set_desired(doc)
+                self._apply(doc)
+            else:
+                self.music.play(cmd.track)
+        elif self.source is self.music:
+            if cmd.action == "pause":
+                self.music.pause()
+            elif cmd.action == "resume":
+                self.music.resume()
+            elif cmd.action == "next":
+                self.music.next()
+            elif cmd.action == "prev":
+                self.music.prev()
+        self._publish_snapshot()
+
+    # -- keyboard (when one is attached) ------------------------------------
 
     def _handle_events(self):
         """Handle pygame events."""
@@ -353,13 +291,16 @@ class Application:
                     self.running = False
 
                 elif event.key == pygame.K_SPACE:
-                    self._toggle_pause()
+                    if self.source.paused:
+                        self.source.resume()
+                    else:
+                        self.source.pause()
 
-                elif event.key == pygame.K_n:
-                    self._next_track()
+                elif event.key == pygame.K_n and self.source is self.music:
+                    self.music.next()
 
-                elif event.key == pygame.K_p:
-                    self._previous_track()
+                elif event.key == pygame.K_p and self.source is self.music:
+                    self.music.prev()
 
                 elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
                     self._adjust_persistence(0.1)
@@ -374,13 +315,12 @@ class Application:
                     self._adjust_glow(-0.1)
 
                 elif event.key == pygame.K_r:
-                    # Reset/restart current track or signal generator
-                    if self.use_signal_generator:
-                        self.signal_generator.reset()
+                    if self.source is self.generator_source:
+                        self.generator.reset()
                         print("Signal generator reset")
-                    else:
-                        self.audio_processor.reset()
-                        self._sync_audio_playback()
+                    elif self.music.loaded:
+                        self.music.audio.reset()
+                        self.mixer.load_and_play(self.music.files.get_current_file())
 
                 elif event.key == pygame.K_c:
                     # Clear persistence buffer
@@ -396,95 +336,6 @@ class Application:
                 self.width = event.w
                 self.height = event.h
                 self.renderer.resize(self.width, self.height)
-
-    def _load_current_track(self, skip_on_error: bool = True) -> bool:
-        """Load the current track from the file manager.
-
-        Args:
-            skip_on_error: If True, automatically try the next track on failure.
-        """
-        max_attempts = self.file_manager.get_track_count()
-        attempts = 0
-
-        while attempts < max_attempts:
-            file_path = self.file_manager.get_current_file()
-            if file_path is None:
-                return False
-
-            print(f"Loading: {file_path.name}")
-
-            # Stop any current playback
-            pygame.mixer.music.stop()
-
-            try:
-                # Load for visualization
-                if not self.audio_processor.load_file(file_path):
-                    raise RuntimeError("Failed to decode audio for visualization")
-
-                # Load for audio playback
-                pygame.mixer.music.load(str(file_path))
-                pygame.mixer.music.play()
-
-                self.paused = False
-                self.renderer.clear()
-                return True
-
-            except Exception as e:
-                print(f"Error loading {file_path.name}: {e}")
-                attempts += 1
-
-                if skip_on_error and attempts < max_attempts:
-                    print("Skipping to next track...")
-                    self.file_manager.next_track()
-                else:
-                    return False
-
-        print("No playable tracks found")
-        return False
-
-    def _next_track(self) -> bool:
-        """Advance to the next track."""
-        next_file = self.file_manager.next_track()
-        if next_file is None:
-            return False
-        return self._load_current_track()
-
-    def _previous_track(self) -> bool:
-        """Go to the previous track."""
-        prev_file = self.file_manager.previous_track()
-        if prev_file is None:
-            return False
-        return self._load_current_track()
-
-    def _toggle_pause(self):
-        """Toggle pause state."""
-        self.paused = not self.paused
-        if self.paused:
-            pygame.mixer.music.pause()
-            print("Paused")
-        else:
-            pygame.mixer.music.unpause()
-            print("Resumed")
-
-    def _sync_visualization_to_audio(self):
-        """Sync visualization position to actual audio playback time."""
-        try:
-            # pygame.mixer.music.get_pos() returns milliseconds since playback started
-            audio_pos_ms = pygame.mixer.music.get_pos()
-            if audio_pos_ms >= 0:
-                audio_pos_seconds = audio_pos_ms / 1000.0
-                self.audio_processor.seek(audio_pos_seconds)
-        except Exception:
-            # If we can't get position, just let visualization run freely
-            pass
-
-    def _sync_audio_playback(self):
-        """Sync audio playback with visualization position."""
-        position = self.audio_processor.get_position_seconds()
-        try:
-            pygame.mixer.music.play(start=position)
-        except Exception:
-            pygame.mixer.music.play()
 
     def _adjust_persistence(self, delta: float):
         """Adjust decay rate."""
@@ -507,30 +358,51 @@ class Application:
         self.renderer.set_beam_sharpness(new_sharpness)
         print(f"Beam sharpness: {new_sharpness:.1f}")
 
+    # -- shutdown and restart -----------------------------------------------
+
     def _cleanup(self):
         """Clean up resources."""
-        if not self.use_signal_generator:
-            try:
-                pygame.mixer.music.stop()
-                pygame.mixer.quit()
-            except Exception:
-                pass
+        if self.writer is not None:
+            self.writer.flush()
+        try:
+            self.mixer.quit()
+        except Exception as e:
+            print(f"Error stopping audio: {e!r}")
         pygame.quit()
+
+    def _reexec(self):
+        """Replace this process with a fresh copy that loads config/active.json."""
+        # orig_argv keeps interpreter flags such as -u. Drop --reset: it would
+        # reseed active.json from the CLI file and lose the web edits.
+        argv = [a for a in sys.orig_argv if a != "--reset"]
+        print("Restarting...")
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable] + argv[1:])
+
+
+def lan_address() -> str:
+    """Best guess at this machine's LAN IP (no packets are sent)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "localhost"
+    finally:
+        s.close()
 
 
 def main():
     """Main entry point."""
-    # Look for config file
-    config_path = "config.json"
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
+    parser = argparse.ArgumentParser(description="Audio Oscilloscope Visualizer")
+    parser.add_argument("config", nargs="?",
+                        help="config file (or music directory) used to seed config/active.json")
+    parser.add_argument("--reset", action="store_true",
+                        help="reseed config/active.json from the config argument")
+    args = parser.parse_args()
 
-    # Check if config path is actually a directory (music folder)
-    if Path(config_path).is_dir():
-        config = Config()
-        config.input_directory = config_path
-    else:
-        config = Config(config_path)
+    config = Config(load_startup_config(CONFIG_DIR, args.config, args.reset))
 
     print("Audio Oscilloscope Visualizer")
     print("=" * 40)
@@ -557,7 +429,13 @@ def main():
     print("  Q/Esc     - Quit")
     print()
 
-    app = Application(config)
+    state = AppState(config.doc)
+    writer = DebouncedWriter(CONFIG_DIR / "active.json")
+    app = Application(config, state, writer)
+    # Start serving only once the app has published its initial state
+    server = start_web_server(state, PresetStore(CONFIG_DIR), config.web_port)
+    if server is not None:
+        print(f"  on the LAN: http://{lan_address()}:{config.web_port}/")
     app.run()
 
 

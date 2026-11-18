@@ -53,10 +53,9 @@ class AudioProcessor:
             raw_samples = raw_samples.astype(np.float32) / max_val
 
             # Reshape to stereo (interleaved L, R, L, R, ...)
+            # amplitude_scale is applied per buffer in get_buffer() so it can
+            # be changed while a track is playing.
             self.samples = raw_samples.reshape(-1, 2)
-
-            # Apply amplitude scaling
-            self.samples *= self.amplitude_scale
 
             self.current_position = 0
             self.is_loaded = True
@@ -95,7 +94,7 @@ class AudioProcessor:
             buffer = self.samples[self.current_position:end_position]
 
         self.current_position = end_position
-        return buffer.astype(np.float32)
+        return buffer.astype(np.float32) * np.float32(self.amplitude_scale)
 
     def get_position_seconds(self) -> float:
         """Get current playback position in seconds."""

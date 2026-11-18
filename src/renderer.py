@@ -571,11 +571,19 @@ class OscilloscopeRenderer:
 
     def set_trace_color(self, color: Tuple[float, float, float]):
         """Set the trace color."""
-        self.trace_color = color
+        self.trace_color = tuple(color)
+
+    def set_trace_width(self, width: float):
+        """Set the trace line width in pixels."""
+        self.trace_width = max(0.1, width)
+
+    def set_background_color(self, color: Tuple[float, float, float]):
+        """Set the background color (RGB, 0.0-1.0)."""
+        self.background_color = tuple(color)
 
     def set_decay_rate(self, rate: float):
-        """Set the decay rate."""
-        self.decay_rate = max(0.0, min(1.0, rate))
+        """Set the decay rate (same range the config store accepts)."""
+        self.decay_rate = max(0.0, min(20.0, rate))
 
     def set_glow_intensity(self, intensity: float):
         """Set the glow intensity."""
@@ -583,7 +591,7 @@ class OscilloscopeRenderer:
 
     def set_glow_radius(self, radius: int):
         """Set the glow blur radius."""
-        self.glow_radius = max(1, radius)
+        self.glow_radius = max(0.0, radius)
 
     def set_beam_sharpness(self, sharpness: float):
         """Set the beam sharpness (higher = sharper core, lower = softer)."""

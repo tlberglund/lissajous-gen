@@ -1,0 +1,609 @@
+/* Oscilloscope front panel, drawn by the beam: stroke only, phosphor glow. */
+
+:root {
+   --panel: #030a04;
+   --phosphor: #3dff6e;
+   --phosphor-dim: #1a6b2e;
+   --graticule: #0c2a14;
+   --amber: #ffb000;
+   --error: #ff5a3c;
+   --stroke: 1.6px;
+   --glow: drop-shadow(0 0 1.5px currentColor) drop-shadow(0 0 5px color-mix(in srgb, currentColor 55%, transparent));
+   --gap: 14px;
+   color-scheme: dark;
+}
+
+* {
+   box-sizing: border-box;
+}
+
+[hidden] {
+   display: none !important;
+}
+
+html,
+body {
+   margin: 0;
+   background: var(--panel);
+   color: var(--phosphor);
+   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   -webkit-tap-highlight-color: transparent;
+}
+
+body {
+   min-height: 100vh;
+   padding: 16px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left));
+}
+
+.panel {
+   max-width: 1180px;
+   margin: 0 auto;
+}
+
+/* ---- vector primitives ---------------------------------------------- */
+
+svg {
+   overflow: visible;
+}
+
+.vtext path,
+.icon path,
+.dial line,
+.dial circle,
+.lamp circle,
+.track rect,
+.waves path,
+.swatch circle {
+   fill: none;
+   stroke: currentColor;
+   stroke-width: var(--stroke);
+   stroke-linecap: round;
+   stroke-linejoin: round;
+}
+
+.vtext,
+.icon,
+.dial,
+.lamp,
+.track,
+.waves svg {
+   filter: var(--glow);
+   display: block;
+}
+
+.vtext {
+   max-width: 100%;
+   height: auto;
+}
+
+.legend {
+   color: var(--phosphor-dim);
+}
+
+/* ---- header ----------------------------------------------------------- */
+
+.top {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   justify-content: space-between;
+   gap: 12px 24px;
+   padding-bottom: 14px;
+   margin-bottom: 18px;
+   border-bottom: var(--stroke) solid var(--phosphor-dim);
+}
+
+.top h1 {
+   margin: 0;
+}
+
+.leds {
+   display: flex;
+   flex-wrap: wrap;
+   align-items: center;
+   gap: 10px 16px;
+}
+
+.led {
+   display: inline-flex;
+   align-items: center;
+   gap: 6px;
+   color: var(--phosphor-dim);
+}
+
+.led .core {
+   opacity: 0;
+}
+
+.led.on {
+   color: var(--phosphor);
+}
+
+.led.on .core {
+   opacity: 1;
+}
+
+.led.error.on {
+   color: var(--error);
+}
+
+.led.amber.on {
+   color: var(--amber);
+}
+
+.errors:empty {
+   display: none;
+}
+
+.errors {
+   margin: -6px 0 18px;
+   color: var(--error);
+   display: grid;
+   gap: 6px;
+}
+
+/* ---- layout ----------------------------------------------------------- */
+
+.grid {
+   display: grid;
+   grid-template-columns: 1fr;
+   gap: 22px;
+}
+
+.slot-source { order: 1; }
+.slot-x { order: 2; }
+.slot-y { order: 3; }
+.slot-beam { order: 4; }
+.slot-presets { order: 5; }
+.slot-system { order: 6; }
+
+@media (min-width: 900px) {
+   .grid {
+      grid-template-columns: 1fr 1fr;
+   }
+   .slot-source { order: 1; }
+   .slot-presets { order: 2; }
+   .slot-x { order: 3; }
+   .slot-y { order: 4; }
+   .slot-beam { order: 5; }
+   .slot-system { order: 6; }
+}
+
+/* A bezel: stroked frame, corner ticks, faint 10x8 graticule */
+.bezel {
+   position: relative;
+   height: 100%;
+   padding: 26px 16px 18px;
+   border: var(--stroke) solid var(--phosphor-dim);
+   border-radius: 6px;
+   background-image:
+      linear-gradient(to right, var(--graticule) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--graticule) 1px, transparent 1px);
+   background-size: 10% 12.5%;
+   background-position: -1px -1px;
+   display: grid;
+   gap: var(--gap);
+   align-content: start;
+}
+
+.bezel::before,
+.bezel::after {
+   content: "";
+   position: absolute;
+   width: 12px;
+   height: 12px;
+   border: var(--stroke) solid var(--phosphor);
+   filter: var(--glow);
+   pointer-events: none;
+}
+
+.bezel::before {
+   top: -1px;
+   right: -1px;
+   border-left: 0;
+   border-bottom: 0;
+   border-top-right-radius: 6px;
+}
+
+.bezel::after {
+   bottom: -1px;
+   left: -1px;
+   border-right: 0;
+   border-top: 0;
+   border-bottom-left-radius: 6px;
+}
+
+.bezel > .legend {
+   position: absolute;
+   top: -10px;
+   left: 12px;
+   display: flex;
+   gap: 10px;
+   align-items: center;
+   padding: 0 8px;
+   background: var(--panel);
+   color: var(--phosphor);
+}
+
+.bezel .note {
+   color: var(--amber);
+}
+
+.bezel.idle > :not(.legend) {
+   opacity: 0.45;
+}
+
+.bezel.idle .note {
+   color: var(--phosphor-dim);
+}
+
+.row {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 10px 18px;
+   align-items: flex-start;
+}
+
+.row.center {
+   justify-content: center;
+}
+
+.row.tight {
+   gap: 6px;
+   align-items: center;
+   flex-wrap: nowrap;
+}
+
+/* ---- controls --------------------------------------------------------- */
+
+button {
+   font: inherit;
+   color: inherit;
+   background: none;
+   border: 0;
+   padding: 0;
+   cursor: pointer;
+}
+
+button:disabled {
+   cursor: default;
+   opacity: 0.3;
+}
+
+:focus-visible {
+   outline: var(--stroke) dashed var(--phosphor);
+   outline-offset: 3px;
+}
+
+.knob {
+   display: grid;
+   justify-items: center;
+   gap: 0;
+   min-width: 72px;
+   touch-action: none;
+}
+
+.dial {
+   width: 64px;
+   height: 64px;
+   cursor: ns-resize;
+   touch-action: none;
+}
+
+.dial .rim {
+   stroke: var(--phosphor-dim);
+}
+
+.dial .tick {
+   stroke: var(--phosphor-dim);
+   filter: none;
+}
+
+.dial .tick.lit {
+   stroke: var(--phosphor);
+}
+
+.dial .pointer {
+   stroke-width: 2.4px;
+}
+
+.knob.turning .dial {
+   filter: drop-shadow(0 0 2px currentColor) drop-shadow(0 0 9px currentColor);
+}
+
+.readout {
+   min-height: 44px;
+   min-width: 44px;
+   display: grid;
+   place-items: center;
+   padding: 2px 6px;
+   border-bottom: 1px dotted var(--phosphor-dim);
+}
+
+.entry {
+   width: 84px;
+   min-height: 44px;
+   padding: 4px 8px;
+   font: 15px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+   color: var(--phosphor);
+   background: transparent;
+   border: var(--stroke) solid var(--phosphor-dim);
+   border-radius: 3px;
+   caret-color: var(--phosphor);
+}
+
+.entry.wide {
+   flex: 1 1 140px;
+   width: auto;
+}
+
+.entry:focus {
+   outline: none;
+   border-color: var(--phosphor);
+   box-shadow: 0 0 6px color-mix(in srgb, var(--phosphor) 50%, transparent);
+}
+
+.entry:disabled {
+   opacity: 0.35;
+}
+
+.entry::placeholder {
+   color: var(--phosphor-dim);
+}
+
+.slide {
+   display: inline-flex;
+   align-items: center;
+   gap: 8px;
+   min-height: 44px;
+}
+
+.slide .lever {
+   transition: x 120ms ease-out;
+}
+
+.slide .cap-left {
+   color: var(--phosphor);
+}
+
+.slide .cap-right,
+.slide.right .cap-left {
+   color: var(--phosphor-dim);
+}
+
+.slide.right .cap-right {
+   color: var(--phosphor);
+}
+
+.switchcell {
+   display: grid;
+   justify-items: center;
+   gap: 4px;
+}
+
+.waves {
+   display: flex;
+   gap: 8px;
+   flex-wrap: wrap;
+}
+
+.wave {
+   min-width: 60px;
+   min-height: 44px;
+   display: grid;
+   place-items: center;
+   color: var(--phosphor-dim);
+   border: var(--stroke) solid var(--phosphor-dim);
+   border-radius: 4px;
+}
+
+.wave.on {
+   color: var(--phosphor);
+   border-color: var(--phosphor);
+   box-shadow: 0 0 6px color-mix(in srgb, var(--phosphor) 45%, transparent);
+}
+
+.wave svg {
+   filter: none;
+}
+
+.wave.on svg {
+   filter: var(--glow);
+}
+
+.ibtn,
+.tbtn {
+   min-width: 44px;
+   min-height: 44px;
+   display: inline-grid;
+   place-items: center;
+   border: var(--stroke) solid var(--phosphor-dim);
+   border-radius: 4px;
+   padding: 0 10px;
+}
+
+.ibtn:not(:disabled):hover,
+.tbtn:not(:disabled):hover,
+.wave:hover,
+.track:hover,
+.preset:hover {
+   border-color: var(--phosphor);
+}
+
+.tbtn.warn,
+.vtext.warn {
+   color: var(--amber);
+}
+
+.tbtn.warn {
+   border-color: var(--amber);
+}
+
+.group {
+   display: grid;
+   gap: 6px;
+}
+
+.group-head {
+   display: flex;
+   align-items: center;
+   gap: 10px;
+}
+
+.swatch {
+   filter: drop-shadow(0 0 4px currentColor);
+}
+
+.swatch circle {
+   stroke-width: 3px;
+}
+
+/* ---- keyframe timebase strip ----------------------------------------- */
+
+.strip-head {
+   display: flex;
+   justify-content: space-between;
+   margin-bottom: -8px;
+}
+
+.strip {
+   display: flex;
+   gap: 4px;
+   min-height: 48px;
+}
+
+.seg {
+   flex-basis: 0;
+   min-width: 30px;
+   display: grid;
+   place-items: center;
+   color: var(--phosphor-dim);
+   border: var(--stroke) solid var(--phosphor-dim);
+   border-radius: 3px;
+}
+
+.seg.random {
+   border-style: dashed;
+}
+
+.seg.sel {
+   color: var(--phosphor);
+   border-color: var(--phosphor);
+   box-shadow: 0 0 6px color-mix(in srgb, var(--phosphor) 45%, transparent),
+               inset 0 0 6px color-mix(in srgb, var(--phosphor) 25%, transparent);
+}
+
+.tools {
+   gap: 8px;
+}
+
+.kf-editor {
+   display: grid;
+   gap: 12px;
+}
+
+.field {
+   display: grid;
+   grid-template-columns: auto 1fr;
+   align-items: center;
+   gap: 12px;
+   padding-top: 10px;
+   border-top: 1px dashed var(--graticule);
+}
+
+/* ---- lists ------------------------------------------------------------ */
+
+.tracks,
+.presets {
+   list-style: none;
+   margin: 0;
+   padding: 0;
+   display: grid;
+   gap: 4px;
+}
+
+.track,
+.preset {
+   width: 100%;
+   min-height: 44px;
+   display: flex;
+   align-items: center;
+   gap: 6px;
+   padding: 0 10px;
+   color: var(--phosphor-dim);
+   border: 1px solid transparent;
+   border-radius: 3px;
+}
+
+.track.current,
+.preset.current {
+   color: var(--phosphor);
+   border-color: var(--phosphor-dim);
+}
+
+.track .marker {
+   width: 12px;
+}
+
+.transport {
+   gap: 12px;
+}
+
+.empty {
+   color: var(--phosphor-dim);
+   padding: 8px 0;
+}
+
+.save {
+   align-items: center;
+   flex-wrap: nowrap;
+}
+
+.presetmsg:empty {
+   display: none;
+}
+
+/* ---- errors ----------------------------------------------------------- */
+
+.bad {
+   color: var(--error);
+}
+
+.bad .dial .tick,
+.bad .dial .tick.lit,
+.bad .dial .rim,
+.seg.bad,
+.wave.bad,
+.waves.bad .wave {
+   stroke: var(--error);
+   border-color: var(--error);
+}
+
+.bad .readout {
+   border-bottom-color: var(--error);
+}
+
+.bad .entry,
+.entry.bad {
+   border-color: var(--error);
+   color: var(--error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+   .slide .lever {
+      transition: none;
+   }
+}
+
+@media (max-width: 420px) {
+   .bezel {
+      padding: 24px 10px 14px;
+   }
+   .field {
+      grid-template-columns: 1fr;
+      justify-items: start;
+   }
+   .knob {
+      min-width: 64px;
+   }
+}

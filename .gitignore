@@ -4,3 +4,5 @@ __pycache__/
 music/*.mp3
 .venv/
 
+config/active.json
+config/*.tmp
